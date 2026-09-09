@@ -1,0 +1,107 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © tradylicious77
+
+//@version=6
+// ============================================================================
+// Volume Anomaly Detector — Institutional Activity
+// Detects unusual volume spikes combined with large candles
+// that may indicate institutional order flow
+//
+// Logic translated from Python Isolation Forest + Rolling Z-score model
+// trained on BTC/USD 5M data (2023-2026)
+//
+// Author: César Velázquez
+// ============================================================================
+
+//@version=6
+indicator("Volume Anomaly Detector", overlay=true, max_labels_count=500)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+vol_window        = input.int(288,  "Volume Window (bars)",     minval=50)
+vol_threshold     = input.float(3.0, "Volume Z-score Threshold", minval=1.0)
+candle_threshold  = input.float(2.0, "Candle Z-score Threshold", minval=1.0)
+ratio_threshold   = input.float(2.0, "Min Volume Ratio",         minval=1.0)
+cluster_window    = input.int(10,   "Cluster Filter Window",     minval=5)
+cluster_max       = input.int(2,    "Max Anomalies in Window",   minval=1)
+
+// ── Volume calculations ───────────────────────────────────────────────────────
+vol_ma    = ta.sma(volume, vol_window)
+vol_std   = ta.stdev(volume, vol_window)
+vol_zscore = vol_std > 0 ? (volume - vol_ma) / vol_std : 0
+vol_ratio  = vol_ma > 0 ? volume / vol_ma : 0
+
+// ── Candle size calculations ──────────────────────────────────────────────────
+candle_size    = math.abs(close - open) / open * 100
+candle_ma      = ta.sma(candle_size, vol_window)
+candle_std     = ta.stdev(candle_size, vol_window)
+candle_zscore  = candle_std > 0 ? (candle_size - candle_ma) / candle_std : 0
+
+// ── CVD — Cumulative Volume Delta ─────────────────────────────────────────────
+vol_delta = close >= open ? volume : -volume
+cvd_50    = math.sum(vol_delta, 50)
+
+// ── Anomaly conditions ────────────────────────────────────────────────────────
+cond_vol    = vol_zscore > vol_threshold
+cond_candle = candle_zscore > candle_threshold
+cond_ratio  = vol_ratio > ratio_threshold
+
+raw_anomaly = cond_vol and cond_candle and cond_ratio
+
+// ── Cluster filter ────────────────────────────────────────────────────────────
+anomaly_count = math.sum(raw_anomaly ? 1 : 0, cluster_window)
+is_anomaly    = raw_anomaly and anomaly_count <= cluster_max
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+// Direction — buying or selling anomaly?
+is_bullish = vol_delta > 0
+
+// Plot markers on price
+
+// ── Multi-Timeframe Support ───────────────────────────────────────────────────
+// Allows plotting 5M signals on lower timeframes (1M, 3M)
+use_mtf     = input.bool(true, "Enable Multi-Timeframe (show 5M signals on 1M)")
+mtf_tf      = input.timeframe("5", "Source Timeframe")
+
+// Fetch anomaly from higher timeframe
+mtf_anomaly  = use_mtf ? 
+     request.security(syminfo.tickerid, mtf_tf, is_anomaly, 
+                      lookahead=barmerge.lookahead_off) : 
+     is_anomaly
+
+mtf_bullish  = use_mtf ? 
+     request.security(syminfo.tickerid, mtf_tf, is_bullish,
+                      lookahead=barmerge.lookahead_off) : 
+     is_bullish
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+plotshape(mtf_anomaly and mtf_bullish,
+     title    = "Bullish Anomaly",
+     location = location.belowbar,
+     style    = shape.triangleup,
+     size     = size.small,
+     color    = #00BCD4,
+     text     = "🐋")
+
+plotshape(mtf_anomaly and not mtf_bullish,
+     title    = "Bearish Anomaly",
+     location = location.abovebar,
+     style    = shape.triangledown,
+     size     = size.small,
+     color    = #F44336,
+     text     = "🐋")
+
+bgcolor(mtf_anomaly ? color.new(color.yellow, 85) : na,
+        title = "Anomaly Background")
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(mtf_anomaly and mtf_bullish,
+     title   = "Bullish Volume Anomaly",
+     message = "🐋 Bullish institutional activity detected on {{ticker}}")
+
+alertcondition(mtf_anomaly and not mtf_bullish,
+     title   = "Bearish Volume Anomaly",
+     message = "🐋 Bearish institutional activity detected on {{ticker}}")
+
+alertcondition(mtf_anomaly,
+     title   = "Volume Anomaly",
+     message = "🐋 Volume anomaly detected on {{ticker}}")
